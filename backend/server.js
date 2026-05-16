@@ -33,15 +33,39 @@ function mapTrack(track) {
   };
 }
 
-// ─── Rate limiting: 2 canciones por mesa cada 10 minutos ─────────────────────
-const queueLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: 2,
-  keyGenerator: (req) => `mesa-${req.body?.mesa || req.ip}`,
-  message: { error: "Límite alcanzado. Solo puedes agregar 2 canciones cada 10 minutos." },
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+// ─── Rate limiting manual: solo cuenta adiciones exitosas ────────────────────
+const mesaCounters = new Map(); // key: mesaId → { count, resetAt }
+
+function checkAndIncrementLimit(mesa) {
+  const key = `mesa-${mesa}`;
+  const now = Date.now();
+  const window = 10 * 60 * 1000; // 10 minutos
+  const MAX = 2;
+
+  const entry = mesaCounters.get(key);
+  if (!entry || now >= entry.resetAt) {
+    // Ventana nueva: no incrementar aún, solo verificar que hay cupo
+    return { allowed: true, remaining: MAX - 1 };
+  }
+  if (entry.count >= MAX) {
+    const secsLeft = Math.ceil((entry.resetAt - now) / 1000);
+    const minsLeft = Math.ceil(secsLeft / 60);
+    return { allowed: false, minsLeft };
+  }
+  return { allowed: true, remaining: MAX - entry.count - 1 };
+}
+
+function commitLimit(mesa) {
+  const key = `mesa-${mesa}`;
+  const now = Date.now();
+  const window = 10 * 60 * 1000;
+  const entry = mesaCounters.get(key);
+  if (!entry || now >= entry.resetAt) {
+    mesaCounters.set(key, { count: 1, resetAt: now + window });
+  } else {
+    entry.count += 1;
+  }
+}
 
 // ─── Token store ──────────────────────────────────────────────────────────────
 let tokenStore = { access_token: null, refresh_token: null, expires_at: null };
@@ -224,14 +248,22 @@ async function getRecentlyPlayed() {
 }
 
 // ─── Agregar a la cola ────────────────────────────────────────────────────────
-app.post("/api/queue", queueLimiter, async (req, res) => {
+app.post("/api/queue", async (req, res) => {
   const { uri, mesa } = req.body;
   if (!uri || !uri.startsWith("spotify:track:")) {
     return res.status(400).json({ error: "URI inválida" });
   }
 
+  // 1. Verificar cupo ANTES de hacer nada (sin consumirlo aún)
+  const limitCheck = checkAndIncrementLimit(mesa || req.ip);
+  if (!limitCheck.allowed) {
+    return res.status(429).json({
+      error: `Límite alcanzado. Puedes agregar 2 canciones cada 10 minutos. Intenta en ${limitCheck.minsLeft} min.`,
+    });
+  }
+
   try {
-    // Verificar si fue reproducida en los últimos 90 minutos
+    // 2. Verificar si fue reproducida en los últimos 90 minutos
     try {
       const recent = await getRecentlyPlayed();
       const cutoff = Date.now() - 90 * 60 * 1000;
@@ -239,13 +271,13 @@ app.post("/api/queue", queueLimiter, async (req, res) => {
         item => item.track?.uri === uri && new Date(item.played_at).getTime() > cutoff
       );
       if (wasPlayed) {
+        // NO consumimos el cupo — la canción no se agregó
         return res.status(409).json({
           error: "Esta canción sonó hace menos de 90 minutos. ¡Elige otra!",
         });
       }
     } catch (rpErr) {
       console.warn("No se pudo verificar historial:", rpErr.message);
-      // No bloqueamos si falla la verificación
     }
 
     const token = await getValidToken();
@@ -255,7 +287,9 @@ app.post("/api/queue", queueLimiter, async (req, res) => {
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    rpCache.fetchedAt = 0; // invalidar caché de historial
+    // 3. Solo aquí consumimos el cupo — la canción fue efectivamente agregada
+    commitLimit(mesa || req.ip);
+    rpCache.fetchedAt = 0;
     console.log(`🎵 Mesa ${mesa || "?"}: ${uri}`);
     res.json({ success: true });
   } catch (err) {
