@@ -155,6 +155,43 @@ app.get("/api/playlists/:id/songs", async (req, res) => {
   }
 });
 
+// ─── API: búsqueda cruzada en todas las playlists ────────────────────────────
+app.get("/api/search", async (req, res) => {
+  const q = (req.query.q || "").trim().toLowerCase();
+  if (q.length < 2) return res.status(400).json({ error: "Escribe al menos 2 caracteres" });
+
+  try {
+    // Carga en paralelo todas las playlists (usa caché si está disponible)
+    const results = await Promise.all(
+      PLAYLISTS.map(async (pl) => {
+        try {
+          const songs = await fetchPlaylistSongs(pl.id);
+          return songs
+            .filter(s =>
+              s.title.toLowerCase().includes(q) ||
+              s.artist.toLowerCase().includes(q) ||
+              s.album.toLowerCase().includes(q)
+            )
+            .map(s => ({ ...s, category: { id: pl.id, name: pl.name, icon: pl.icon, accent: pl.accent } }));
+        } catch { return []; }
+      })
+    );
+
+    // Aplanar y deduplicar por URI
+    const seen = new Set();
+    const songs = results.flat().filter(s => {
+      if (seen.has(s.uri)) return false;
+      seen.add(s.uri);
+      return true;
+    });
+
+    res.json({ songs, query: q });
+  } catch (err) {
+    console.error("Error búsqueda:", err.message);
+    res.status(500).json({ error: "Error al buscar" });
+  }
+});
+
 // ─── API: now playing ─────────────────────────────────────────────────────────
 app.get("/api/now-playing", async (req, res) => {
   try {
