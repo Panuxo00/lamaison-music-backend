@@ -1,8 +1,7 @@
 require("dotenv").config();
 const express = require("express");
-const axios = require("axios");
-const cors = require("cors");
-const rateLimit = require("express-rate-limit");
+const axios   = require("axios");
+const cors    = require("cors");
 
 const app = express();
 app.use(express.json());
@@ -11,10 +10,10 @@ app.use(cors({
     process.env.FRONTEND_URL || "http://localhost:5173",
     "https://lamaisonafta.cl",
     "http://lamaisonafta.cl",
-  ]
+  ],
 }));
 
-// ─── Helper ───────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 function formatDuration(ms) {
   const min = Math.floor(ms / 60000);
   const sec = Math.floor((ms % 60000) / 1000).toString().padStart(2, "0");
@@ -33,58 +32,38 @@ function mapTrack(track) {
   };
 }
 
-// ─── Rate limiting manual: solo cuenta adiciones exitosas ────────────────────
-const mesaCounters = new Map(); // key: mesaId → { count, resetAt }
+// ─── Playlists por categoría ──────────────────────────────────────────────────
+const PLAYLISTS = [
+  { id: "3chHQ9n09g9gs6QvkWkl3O", name: "Jazz",           icon: "🎷", gradient: ["#0e2240","#1a3a5c"], accent: "#4a90c4" },
+  { id: "0CdxyUJCNDWoEYnRQ3bA7m", name: "Bossa Nova",     icon: "🎸", gradient: ["#3d1f00","#6b3810"], accent: "#d4874a" },
+  { id: "0YgY3toqJ3DLMGgFTE8bRY", name: "Pop Suave",      icon: "🎤", gradient: ["#2d0a38","#4e1660"], accent: "#c47ad4" },
+  { id: "66UlFLeNXUqf8Kau6olQCd", name: "Acústico",       icon: "🪕", gradient: ["#1a2e0a","#2e5010"], accent: "#7dbf4a" },
+  { id: "2XpIURbMf1wRprM1wxhTq9", name: "Lounge & Chill", icon: "🌙", gradient: ["#080e2a","#101e48"], accent: "#5a7ad4" },
+  { id: "26fs3ZXB76x0Hk1SH4B6HL", name: "Retro",          icon: "📻", gradient: ["#2a1a00","#4a3008"], accent: "#d4a84a" },
+  { id: "79dY6XMFfuCPoQdUNcVWsT", name: "Energy",         icon: "⚡", gradient: ["#2a0000","#500808"], accent: "#d44a4a" },
+  { id: "5LfnafdRLXOJ0iHUFx8qxX", name: "Tropical",      icon: "🌴", gradient: ["#002a1a","#005030"], accent: "#4ad4a0" },
+  { id: "54I71IeL3COBcBoIUfYMTX", name: "Pop for Kids",   icon: "✨", gradient: ["#1a0a30","#320f58"], accent: "#a07ad4" },
+  { id: "3EtpM6cIXfJHWk5QWYWqeN", name: "Upbeat",         icon: "🎉", gradient: ["#2a1000","#502008"], accent: "#d4784a" },
+];
 
-function checkAndIncrementLimit(mesa) {
-  const key = `mesa-${mesa}`;
-  const now = Date.now();
-  const window = 10 * 60 * 1000; // 10 minutos
-  const MAX = 2;
-
-  const entry = mesaCounters.get(key);
-  if (!entry || now >= entry.resetAt) {
-    // Ventana nueva: no incrementar aún, solo verificar que hay cupo
-    return { allowed: true, remaining: MAX - 1 };
-  }
-  if (entry.count >= MAX) {
-    const secsLeft = Math.ceil((entry.resetAt - now) / 1000);
-    const minsLeft = Math.ceil(secsLeft / 60);
-    return { allowed: false, minsLeft };
-  }
-  return { allowed: true, remaining: MAX - entry.count - 1 };
-}
-
-function commitLimit(mesa) {
-  const key = `mesa-${mesa}`;
-  const now = Date.now();
-  const window = 10 * 60 * 1000;
-  const entry = mesaCounters.get(key);
-  if (!entry || now >= entry.resetAt) {
-    mesaCounters.set(key, { count: 1, resetAt: now + window });
-  } else {
-    entry.count += 1;
-  }
-}
+// Caché individual por playlist (TTL 5 min)
+const songCache = new Map(); // playlistId → { songs, fetchedAt }
+const CACHE_TTL = 5 * 60 * 1000;
 
 // ─── Token store ──────────────────────────────────────────────────────────────
 let tokenStore = { access_token: null, refresh_token: null, expires_at: null };
 
 async function getValidToken() {
   if (!tokenStore.access_token) {
-    throw new Error("El restaurante aún no ha autorizado Spotify. Ve a /admin/login");
+    throw new Error("Spotify no autorizado. Ve a /admin/login");
   }
-  if (tokenStore.expires_at && Date.now() >= tokenStore.expires_at - 60_000) {
-    const params = new URLSearchParams({
-      grant_type:    "refresh_token",
-      refresh_token: tokenStore.refresh_token,
-    });
+  if (Date.now() >= (tokenStore.expires_at || 0) - 60_000) {
     const authHeader = Buffer.from(
       `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
     ).toString("base64");
     const { data } = await axios.post(
       "https://accounts.spotify.com/api/token",
-      params.toString(),
+      new URLSearchParams({ grant_type: "refresh_token", refresh_token: tokenStore.refresh_token }).toString(),
       { headers: { Authorization: `Basic ${authHeader}`, "Content-Type": "application/x-www-form-urlencoded" } }
     );
     tokenStore.access_token = data.access_token;
@@ -93,6 +72,24 @@ async function getValidToken() {
     console.log("✅ Token refrescado");
   }
   return tokenStore.access_token;
+}
+
+// ─── Fetch songs de una playlist ──────────────────────────────────────────────
+async function fetchPlaylistSongs(playlistId, force = false) {
+  const cached = songCache.get(playlistId);
+  if (!force && cached && Date.now() - cached.fetchedAt < CACHE_TTL) {
+    return cached.songs;
+  }
+  const token = await getValidToken();
+  const { data } = await axios.get(
+    `https://api.spotify.com/v1/playlists/${playlistId}/items`,
+    { headers: { Authorization: `Bearer ${token}` }, params: { limit: 100, market: "CL" } }
+  );
+  const songs = (data.items || [])
+    .filter(i => (i.track || i.item)?.uri)
+    .map(i => mapTrack(i.track || i.item));
+  songCache.set(playlistId, { songs, fetchedAt: Date.now() });
+  return songs;
 }
 
 // ─── OAuth ────────────────────────────────────────────────────────────────────
@@ -110,92 +107,55 @@ app.get("/admin/login", (req, res) => {
     client_id:     process.env.SPOTIFY_CLIENT_ID,
     scope:         scopes,
     redirect_uri:  process.env.SPOTIFY_REDIRECT_URI,
-    state:         "lamaison-auth",
   });
   res.redirect(`https://accounts.spotify.com/authorize?${params}`);
 });
 
 app.get("/admin/callback", async (req, res) => {
   const { code, error } = req.query;
-  if (error) return res.send(`<h2>❌ Error: ${error}</h2>`);
+  if (error) return res.send(`<h2>❌ ${error}</h2>`);
   try {
-    const params = new URLSearchParams({
-      grant_type:   "authorization_code",
-      code,
-      redirect_uri: process.env.SPOTIFY_REDIRECT_URI,
-    });
     const authHeader = Buffer.from(
       `${process.env.SPOTIFY_CLIENT_ID}:${process.env.SPOTIFY_CLIENT_SECRET}`
     ).toString("base64");
     const { data } = await axios.post(
       "https://accounts.spotify.com/api/token",
-      params.toString(),
+      new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: process.env.SPOTIFY_REDIRECT_URI }).toString(),
       { headers: { Authorization: `Basic ${authHeader}`, "Content-Type": "application/x-www-form-urlencoded" } }
     );
-    tokenStore.access_token  = data.access_token;
-    tokenStore.refresh_token = data.refresh_token;
-    tokenStore.expires_at    = Date.now() + data.expires_in * 1000;
+    tokenStore = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: Date.now() + data.expires_in * 1000 };
     console.log("✅ Spotify autorizado correctamente");
-    res.send(`
-      <html><body style="font-family:sans-serif;text-align:center;padding:60px;background:#0f0a04;color:#f5f0e8;">
-        <h1 style="color:#d4af37">✅ ¡Autorización exitosa!</h1>
-        <p>La Maison ahora está conectada a Spotify.</p>
-        <p style="color:#6b5a3a;font-size:14px">Puedes cerrar esta ventana.</p>
-      </body></html>
-    `);
+    res.send(`<html><body style="font-family:sans-serif;text-align:center;padding:60px;background:#0f0a04;color:#f5f0e8;">
+      <h1 style="color:#d4af37">✅ ¡Autorización exitosa!</h1><p>Puedes cerrar esta ventana.</p></body></html>`);
   } catch (err) {
-    console.error("Error callback:", err.response?.data || err.message);
     res.status(500).send("<h2>❌ Error al obtener el token</h2>");
   }
 });
 
 app.get("/admin/status", (req, res) => {
-  res.json({
-    authorized: !!tokenStore.access_token,
-    expires_at: tokenStore.expires_at ? new Date(tokenStore.expires_at).toISOString() : null,
-  });
+  res.json({ authorized: !!tokenStore.access_token, expires_at: tokenStore.expires_at ? new Date(tokenStore.expires_at).toISOString() : null });
 });
 
-// ─── Playlist (menú musical) ──────────────────────────────────────────────────
-const PLAYLIST_ID = process.env.PLAYLIST_ID || "4VOxHyvj0xiNQanK5TnCgP";
-let menuCache = { songs: [], fetchedAt: 0 };
-const MENU_TTL = 5 * 60 * 1000; // auto-refresca cada 5 min
+// ─── API: listado de categorías ───────────────────────────────────────────────
+app.get("/api/playlists", (req, res) => {
+  res.json({ playlists: PLAYLISTS.map(p => ({ id: p.id, name: p.name, icon: p.icon, gradient: p.gradient, accent: p.accent })) });
+});
 
-async function fetchPlaylist() {
-  if (Date.now() - menuCache.fetchedAt < MENU_TTL && menuCache.songs.length > 0) {
-    return menuCache.songs;
-  }
-  const token = await getValidToken();
-  const { data } = await axios.get(
-    `https://api.spotify.com/v1/playlists/${PLAYLIST_ID}/items`,
-    { headers: { Authorization: `Bearer ${token}` }, params: { limit: 50, market: "CL" } }
-  );
-  const songs = (data.items || [])
-    .filter(i => (i.track || i.item)?.uri)
-    .map(i => mapTrack(i.track || i.item));
-  menuCache = { songs, fetchedAt: Date.now() };
-  return songs;
-}
-
-app.get("/api/menu", async (req, res) => {
+// ─── API: canciones de una categoría ─────────────────────────────────────────
+app.get("/api/playlists/:id/songs", async (req, res) => {
+  const playlist = PLAYLISTS.find(p => p.id === req.params.id);
+  if (!playlist) return res.status(404).json({ error: "Categoría no encontrada" });
   try {
-    res.json({ songs: await fetchPlaylist() });
+    const force = req.query.refresh === "1";
+    const songs = await fetchPlaylistSongs(playlist.id, force);
+    res.json({ songs, playlist: { id: playlist.id, name: playlist.name, icon: playlist.icon, gradient: playlist.gradient, accent: playlist.accent } });
   } catch (err) {
     console.error("Error playlist:", err.response?.data || err.message);
-    res.status(500).json({ error: "No se pudo leer la playlist" });
+    res.status(500).json({ error: "No se pudo cargar la categoría" });
   }
 });
 
-app.get("/api/menu/refresh", async (req, res) => {
-  menuCache.fetchedAt = 0;
-  try {
-    res.json({ songs: await fetchPlaylist(), refreshed: true });
-  } catch (err) {
-    res.status(500).json({ error: "Error al refrescar" });
-  }
-});
-
-// ─── Now playing ──────────────────────────────────────────────────────────────
+// ─── API: now playing ─────────────────────────────────────────────────────────
 app.get("/api/now-playing", async (req, res) => {
   try {
     const token = await getValidToken();
@@ -206,36 +166,22 @@ app.get("/api/now-playing", async (req, res) => {
     if (status === 204 || !data?.item) return res.json({ playing: false });
     res.json({
       playing: data.is_playing,
-      track: {
-        ...mapTrack(data.item),
-        duration_ms: data.item.duration_ms,
-        progress_ms: data.progress_ms,
-      },
+      track: { ...mapTrack(data.item), duration_ms: data.item.duration_ms, progress_ms: data.progress_ms },
     });
-  } catch (err) {
-    res.json({ playing: false });
-  }
+  } catch { res.json({ playing: false }); }
 });
 
-// ─── Cola de reproducción (próximas canciones) ────────────────────────────────
+// ─── API: cola ────────────────────────────────────────────────────────────────
 app.get("/api/queue", async (req, res) => {
   try {
     const token = await getValidToken();
-    const { data } = await axios.get(
-      "https://api.spotify.com/v1/me/player/queue",
-      { headers: { Authorization: `Bearer ${token}` } }
-    );
-    const queue = (data.queue || []).slice(0, 10).map(mapTrack);
-    res.json({ queue });
-  } catch (err) {
-    console.error("Error queue:", err.response?.data || err.message);
-    res.json({ queue: [] });
-  }
+    const { data } = await axios.get("https://api.spotify.com/v1/me/player/queue", { headers: { Authorization: `Bearer ${token}` } });
+    res.json({ queue: (data.queue || []).slice(0, 10).map(mapTrack) });
+  } catch { res.json({ queue: [] }); }
 });
 
-// ─── Historial reciente (caché 5 min) ─────────────────────────────────────────
+// ─── Historial reciente ───────────────────────────────────────────────────────
 let rpCache = { items: [], fetchedAt: 0 };
-
 async function getRecentlyPlayed() {
   if (Date.now() - rpCache.fetchedAt < 5 * 60 * 1000) return rpCache.items;
   const token = await getValidToken();
@@ -247,39 +193,60 @@ async function getRecentlyPlayed() {
   return rpCache.items;
 }
 
-// ─── Agregar a la cola ────────────────────────────────────────────────────────
+// ─── Rate limit manual (solo cuenta adiciones exitosas) ───────────────────────
+const mesaCounters = new Map();
+const LIMIT_MAX = 2;
+const LIMIT_WINDOW = 10 * 60 * 1000;
+
+function checkLimit(mesa) {
+  const key = `mesa-${mesa}`;
+  const now  = Date.now();
+  const entry = mesaCounters.get(key);
+  if (!entry || now >= entry.resetAt) return { allowed: true };
+  if (entry.count >= LIMIT_MAX) {
+    return { allowed: false, minsLeft: Math.ceil((entry.resetAt - now) / 60000) };
+  }
+  return { allowed: true };
+}
+
+function commitLimit(mesa) {
+  const key  = `mesa-${mesa}`;
+  const now  = Date.now();
+  const entry = mesaCounters.get(key);
+  if (!entry || now >= entry.resetAt) {
+    mesaCounters.set(key, { count: 1, resetAt: now + LIMIT_WINDOW });
+  } else {
+    entry.count += 1;
+  }
+}
+
+// ─── API: agregar a la cola ───────────────────────────────────────────────────
 app.post("/api/queue", async (req, res) => {
   const { uri, mesa } = req.body;
   if (!uri || !uri.startsWith("spotify:track:")) {
     return res.status(400).json({ error: "URI inválida" });
   }
 
-  // 1. Verificar cupo ANTES de hacer nada (sin consumirlo aún)
-  const limitCheck = checkAndIncrementLimit(mesa || req.ip);
-  if (!limitCheck.allowed) {
+  // 1. Verificar cupo (sin consumirlo)
+  const limit = checkLimit(mesa || req.ip);
+  if (!limit.allowed) {
     return res.status(429).json({
-      error: `Límite alcanzado. Puedes agregar 2 canciones cada 10 minutos. Intenta en ${limitCheck.minsLeft} min.`,
+      error: `Límite alcanzado. Puedes agregar 2 canciones cada 10 minutos. Intenta en ${limit.minsLeft} min.`,
     });
   }
 
   try {
-    // 2. Verificar si fue reproducida en los últimos 90 minutos
+    // 2. Verificar historial 90 min (sin consumir cupo si falla)
     try {
       const recent = await getRecentlyPlayed();
       const cutoff = Date.now() - 90 * 60 * 1000;
-      const wasPlayed = recent.some(
-        item => item.track?.uri === uri && new Date(item.played_at).getTime() > cutoff
-      );
+      const wasPlayed = recent.some(i => i.track?.uri === uri && new Date(i.played_at).getTime() > cutoff);
       if (wasPlayed) {
-        // NO consumimos el cupo — la canción no se agregó
-        return res.status(409).json({
-          error: "Esta canción sonó hace menos de 90 minutos. ¡Elige otra!",
-        });
+        return res.status(409).json({ error: "Esta canción sonó hace menos de 90 minutos. ¡Elige otra!" });
       }
-    } catch (rpErr) {
-      console.warn("No se pudo verificar historial:", rpErr.message);
-    }
+    } catch (e) { console.warn("No se pudo verificar historial:", e.message); }
 
+    // 3. Agregar a Spotify
     const token = await getValidToken();
     await axios.post(
       `https://api.spotify.com/v1/me/player/queue?uri=${encodeURIComponent(uri)}`,
@@ -287,17 +254,16 @@ app.post("/api/queue", async (req, res) => {
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    // 3. Solo aquí consumimos el cupo — la canción fue efectivamente agregada
+    // 4. Solo aquí se consume el cupo
     commitLimit(mesa || req.ip);
     rpCache.fetchedAt = 0;
     console.log(`🎵 Mesa ${mesa || "?"}: ${uri}`);
     res.json({ success: true });
   } catch (err) {
     const s = err.response?.status;
-    if (s === 404) return res.status(503).json({ error: "No hay ningún dispositivo reproduciendo en este momento." });
+    if (s === 404) return res.status(503).json({ error: "No hay dispositivo reproduciendo en este momento." });
     if (s === 403) return res.status(403).json({ error: "Se requiere Spotify Premium." });
-    if (err.response?.data) return res.status(500).json({ error: err.response.data.error?.message || "Error al agregar" });
-    res.status(500).json({ error: err.message || "Error al agregar la canción" });
+    res.status(500).json({ error: err.response?.data?.error?.message || "Error al agregar la canción" });
   }
 });
 
