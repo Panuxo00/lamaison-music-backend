@@ -163,7 +163,7 @@ async function fetchPlaylist() {
   }
   const token = await getValidToken();
   const { data } = await axios.get(
-    "https://api.spotify.com/v1/playlists/" + PLAYLIST_ID + "/tracks",
+    "https://api.spotify.com/v1/playlists/" + PLAYLIST_ID + "/items",
     {
       headers: { Authorization: "Bearer " + token },
       params: { limit: 50, market: "CL", fields: "items(track(id,uri,name,artists,album(name,images),duration_ms))" },
