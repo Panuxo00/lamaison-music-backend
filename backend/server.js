@@ -151,34 +151,57 @@ app.get("/admin/status", (req, res) => {
 });
 
 
-// MENU MUSICAL
-let menuSongs = [];
+// MENU MUSICAL desde playlist de Spotify
+const PLAYLIST_ID = process.env.PLAYLIST_ID || "4VOxHyvj0xiNQanK5TnCgP";
+let menuCache = { songs: [], fetchedAt: 0 };
+const CACHE_TTL = 60 * 1000;
 
-app.get("/api/menu", (req, res) => {
-  res.json({ songs: menuSongs });
+async function fetchPlaylist() {
+  const now = Date.now();
+  if (now - menuCache.fetchedAt < CACHE_TTL && menuCache.songs.length > 0) {
+    return menuCache.songs;
+  }
+  const token = await getValidToken();
+  const { data } = await axios.get(
+    "https://api.spotify.com/v1/playlists/" + PLAYLIST_ID + "/tracks",
+    {
+      headers: { Authorization: "Bearer " + token },
+      params: { limit: 50, market: "CL", fields: "items(track(id,uri,name,artists,album(name,images),duration_ms))" },
+    }
+  );
+  const songs = data.items
+    .filter(i => i.track && i.track.uri)
+    .map(i => ({
+      id:       i.track.id,
+      uri:      i.track.uri,
+      title:    i.track.name,
+      artist:   i.track.artists.map(a => a.name).join(", "),
+      album:    i.track.album.name,
+      cover:    i.track.album.images?.[0]?.url || null,
+      duration: formatDuration(i.track.duration_ms),
+    }));
+  menuCache = { songs, fetchedAt: Date.now() };
+  return songs;
+}
+
+app.get("/api/menu", async (req, res) => {
+  try {
+    const songs = await fetchPlaylist();
+    res.json({ songs });
+  } catch (err) {
+    console.error("Error leyendo playlist:", err.response?.data || err.message);
+    res.status(500).json({ error: "No se pudo leer la playlist de Spotify" });
+  }
 });
 
-app.post("/api/menu", (req, res) => {
-  const { song, adminKey } = req.body;
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: "Clave incorrecta" });
+app.get("/api/menu/refresh", async (req, res) => {
+  menuCache.fetchedAt = 0;
+  try {
+    const songs = await fetchPlaylist();
+    res.json({ songs, refreshed: true });
+  } catch (err) {
+    res.status(500).json({ error: "Error al refrescar la playlist" });
   }
-  if (!song || !song.uri) return res.status(400).json({ error: "Cancion invalida" });
-  if (menuSongs.find((s) => s.uri === song.uri)) {
-    return res.status(409).json({ error: "La cancion ya esta en el menu" });
-  }
-  menuSongs.push(song);
-  res.json({ success: true, songs: menuSongs });
-});
-
-app.delete("/api/menu/:uri", (req, res) => {
-  const { adminKey } = req.body;
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: "Clave incorrecta" });
-  }
-  const uri = decodeURIComponent(req.params.uri);
-  menuSongs = menuSongs.filter((s) => s.uri !== uri);
-  res.json({ success: true, songs: menuSongs });
 });
 
 // ─── RUTAS PÚBLICAS (usadas por los clientes del restaurante) ─────────────────
