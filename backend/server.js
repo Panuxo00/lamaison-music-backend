@@ -150,6 +150,37 @@ app.get("/admin/status", (req, res) => {
   });
 });
 
+
+// MENU MUSICAL
+let menuSongs = [];
+
+app.get("/api/menu", (req, res) => {
+  res.json({ songs: menuSongs });
+});
+
+app.post("/api/menu", (req, res) => {
+  const { song, adminKey } = req.body;
+  if (adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: "Clave incorrecta" });
+  }
+  if (!song || !song.uri) return res.status(400).json({ error: "Cancion invalida" });
+  if (menuSongs.find((s) => s.uri === song.uri)) {
+    return res.status(409).json({ error: "La cancion ya esta en el menu" });
+  }
+  menuSongs.push(song);
+  res.json({ success: true, songs: menuSongs });
+});
+
+app.delete("/api/menu/:uri", (req, res) => {
+  const { adminKey } = req.body;
+  if (adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: "Clave incorrecta" });
+  }
+  const uri = decodeURIComponent(req.params.uri);
+  menuSongs = menuSongs.filter((s) => s.uri !== uri);
+  res.json({ success: true, songs: menuSongs });
+});
+
 // ─── RUTAS PÚBLICAS (usadas por los clientes del restaurante) ─────────────────
 
 // GET /api/search?q=cancion → busca en Spotify
