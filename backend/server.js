@@ -76,6 +76,8 @@ app.get("/admin/login", (req, res) => {
     "user-modify-playback-state",
     "user-read-playback-state",
     "user-read-currently-playing",
+    "playlist-read-private",
+    "playlist-read-collaborative",
   ].join(" ");
 
   const params = new URLSearchParams({
