@@ -171,18 +171,24 @@ async function fetchPlaylist() {
       params: { limit: 50, market: "CL" },
     }
   );
-  console.log("Playlist response items:", data.items?.length, JSON.stringify(data.items?.[0])?.slice(0,200));
-  const songs = data.items
-    .filter(i => i.track && i.track.uri)
-    .map(i => ({
-      id:       i.track.id,
-      uri:      i.track.uri,
-      title:    i.track.name,
-      artist:   i.track.artists.map(a => a.name).join(", "),
-      album:    i.track.album.name,
-      cover:    i.track.album.images?.[0]?.url || null,
-      duration: formatDuration(i.track.duration_ms),
-    }));
+  const firstItem = data.items?.[0];
+  console.log("FULL ITEM KEYS:", Object.keys(firstItem || {}));
+  console.log("TRACK KEYS:", Object.keys(firstItem?.track || firstItem?.item || {}));
+  console.log("SAMPLE URI:", firstItem?.track?.uri || firstItem?.item?.uri || firstItem?.uri);
+  const songs = (data.items || [])
+    .filter(i => (i.track || i.item) && (i.track?.uri || i.item?.uri))
+    .map(i => {
+      const t = i.track || i.item;
+      return {
+        id:       t.id,
+        uri:      t.uri,
+        title:    t.name,
+        artist:   (t.artists || []).map(a => a.name).join(", "),
+        album:    t.album?.name || "",
+        cover:    t.album?.images?.[0]?.url || null,
+        duration: formatDuration(t.duration_ms),
+      };
+    });
   menuCache = { songs, fetchedAt: Date.now() };
   return songs;
 }
