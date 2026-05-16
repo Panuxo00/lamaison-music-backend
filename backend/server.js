@@ -176,12 +176,26 @@ app.get("/api/queue", async (req, res) => {
   try {
     const token = await getValidToken();
     const { data } = await axios.get("https://api.spotify.com/v1/me/player/queue", { headers: { Authorization: `Bearer ${token}` } });
-    res.json({ queue: (data.queue || []).slice(0, 10).map(mapTrack) });
+    const queue = (data.queue || []).slice(0, 10).map(track => {
+      const base = mapTrack(track);
+      const tracked = queueTracker.get(track.uri);
+      return { ...base, addedByMesa: tracked?.mesa || null };
+    });
+    res.json({ queue });
   } catch { res.json({ queue: [] }); }
 });
 
 // ─── Historial reciente ───────────────────────────────────────────────────────
 let rpCache = { items: [], fetchedAt: 0 };
+
+// Tracker: uri → { mesa, addedAt } para mostrar qué mesa agregó cada canción
+const queueTracker = new Map();
+function cleanTracker() {
+  const cutoff = Date.now() - 4 * 60 * 60 * 1000; // limpia entradas > 4 horas
+  for (const [uri, entry] of queueTracker.entries()) {
+    if (entry.addedAt < cutoff) queueTracker.delete(uri);
+  }
+}
 async function getRecentlyPlayed() {
   if (Date.now() - rpCache.fetchedAt < 5 * 60 * 1000) return rpCache.items;
   const token = await getValidToken();
@@ -254,8 +268,9 @@ app.post("/api/queue", async (req, res) => {
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    // 4. Solo aquí se consume el cupo
+    // 4. Solo aquí se consume el cupo y se registra la mesa
     commitLimit(mesa || req.ip);
+    if (mesa) { cleanTracker(); queueTracker.set(uri, { mesa, addedAt: Date.now() }); }
     rpCache.fetchedAt = 0;
     console.log(`🎵 Mesa ${mesa || "?"}: ${uri}`);
     res.json({ success: true });
