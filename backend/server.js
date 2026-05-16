@@ -168,9 +168,10 @@ async function fetchPlaylist() {
     "https://api.spotify.com/v1/playlists/" + PLAYLIST_ID + "/items",
     {
       headers: { Authorization: "Bearer " + token },
-      params: { limit: 50, market: "CL", fields: "items(track(id,uri,name,artists,album(name,images),duration_ms))" },
+      params: { limit: 50, market: "CL" },
     }
   );
+  console.log("Playlist response items:", data.items?.length, JSON.stringify(data.items?.[0])?.slice(0,200));
   const songs = data.items
     .filter(i => i.track && i.track.uri)
     .map(i => ({
